@@ -18,3 +18,5 @@ export const useAnyInterrupted = (): boolean =>
   useMixerSelector((s) => Object.values(s.layers).some((l) => l.interrupted));
 export const useActiveCount = (): number =>
   useMixerSelector((s) => Object.values(s.layers).filter((l) => l.enabled).length);
+export const useEngineError = (): string | null => useMixerSelector((s) => s.error);
+export const useEngineLog = (): readonly string[] => useMixerSelector((s) => s.log);

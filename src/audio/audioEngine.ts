@@ -1,3 +1,4 @@
+import { Asset } from 'expo-asset';
 import { AppState, type AppStateStatus, type NativeEventSubscription } from 'react-native';
 import {
   createAudioPlayer,
@@ -29,7 +30,13 @@ export interface LayerState {
 export interface MixerState {
   master: number; // 0..1
   layers: Record<SoundId, LayerState>;
+  /** Last failure from a native call. Audio failures are silent by default; surface them. */
+  error: string | null;
+  /** Dev-only ring buffer of engine/native events, rendered by <DebugLog />. */
+  log: readonly string[];
 }
+
+const LOG_LIMIT = 40;
 
 const DEFAULT_LAYER_VOLUME = 0.5;
 const DEFAULT_MASTER = 0.8;
@@ -50,7 +57,7 @@ function createInitialState(): MixerState {
       interrupted: false,
     };
   }
-  return { master: DEFAULT_MASTER, layers };
+  return { master: DEFAULT_MASTER, layers, error: null, log: [] };
 }
 
 /**
@@ -68,6 +75,7 @@ export class AudioEngine {
   private players = new Map<SoundId, AudioPlayer>();
   private statusSubs = new Map<SoundId, { remove(): void }>();
   private lastCommandAt = new Map<SoundId, number>();
+  private lastStatusSig = new Map<SoundId, string>();
   private appStateSub: NativeEventSubscription | null = null;
   private initPromise: Promise<void> | null = null;
 
@@ -87,8 +95,16 @@ export class AudioEngine {
   /** Idempotent. Safe to call from a StrictMode-double-invoked effect. */
   init(): Promise<void> {
     this.initPromise ??= (async () => {
-      await configureAudioSession();
-      this.appStateSub = AppState.addEventListener('change', this.onAppStateChange);
+      try {
+        await configureAudioSession();
+        this.appStateSub ??= AppState.addEventListener('change', this.onAppStateChange);
+        this.logEvent('audio session configured');
+      } catch (e) {
+        // Don't cache a rejected promise: that would make every later tap fail identically and silently.
+        this.initPromise = null;
+        this.fail('configureAudioSession', e);
+        throw e;
+      }
     })();
     return this.initPromise;
   }
@@ -99,6 +115,7 @@ export class AudioEngine {
     this.appStateSub = null;
     for (const sub of this.statusSubs.values()) sub.remove();
     this.statusSubs.clear();
+    this.lastStatusSig.clear();
     for (const player of this.players.values()) player.remove();
     this.players.clear();
     this.listeners.clear();
@@ -108,9 +125,13 @@ export class AudioEngine {
   // ---- commands (user intent) ----
 
   async toggleLayer(id: SoundId): Promise<void> {
-    await this.init();
-    if (this.state.layers[id].enabled) this.disableLayer(id);
-    else this.enableLayer(id);
+    try {
+      await this.init();
+      if (this.state.layers[id].enabled) this.disableLayer(id);
+      else this.enableLayer(id);
+    } catch (e) {
+      this.fail(`toggle ${id}`, e);
+    }
   }
 
   setLayerVolume(id: SoundId, volume: number): void {
@@ -153,6 +174,7 @@ export class AudioEngine {
     this.lastCommandAt.set(id, Date.now());
     // pause(), not remove(): keeps the decoder warm so re-enabling is instant.
     // Trade-off: five paused players hold memory. Exercise: release after N seconds idle.
+    this.logEvent(`${id} pause()`);
     this.players.get(id)?.pause();
   }
 
@@ -160,6 +182,7 @@ export class AudioEngine {
     const player = this.ensurePlayer(id);
     player.volume = this.effectiveVolume(id);
     this.lastCommandAt.set(id, Date.now());
+    this.logEvent(`${id} play() vol=${player.volume.toFixed(2)}`);
     player.play(); // safe before the asset has finished loading; native queues it
   }
 
@@ -169,6 +192,10 @@ export class AudioEngine {
     if (existing) return existing;
 
     const def = SOUND_CATALOG.find((s) => s.id === id)!;
+    if (typeof def.source === 'number') {
+      // In Expo Go this is an http:// URL served by Metro; in a release build it is a bundled file.
+      this.logEvent(`${id} source ${Asset.fromModule(def.source).uri}`);
+    }
     const player = createAudioPlayer(def.source, {
       updateInterval: 500, // status event cadence in ms — each tick crosses native -> JS
       keepAudioSessionActive: true, // don't give up audio focus between pause/play
@@ -183,6 +210,19 @@ export class AudioEngine {
   }
 
   private onStatus(id: SoundId, status: AudioStatus): void {
+    const sig = [
+      status.playbackState,
+      status.timeControlStatus,
+      status.reasonForWaitingToPlay,
+      `loaded=${status.isLoaded}`,
+      `playing=${status.playing}`,
+      `buffering=${status.isBuffering}`,
+    ].join(' ');
+    if (this.lastStatusSig.get(id) !== sig) {
+      this.lastStatusSig.set(id, sig);
+      this.logEvent(`${id} ${sig} dur=${status.duration.toFixed(1)}s`);
+    }
+
     const layer = this.state.layers[id];
     const sinceCommand = Date.now() - (this.lastCommandAt.get(id) ?? 0);
     const interrupted =
@@ -212,6 +252,20 @@ export class AudioEngine {
       ...this.state,
       layers: { ...this.state.layers, [id]: { ...current, ...patch } },
     };
+    this.emit();
+  }
+
+  private fail(context: string, e: unknown): void {
+    const message = `${context}: ${e instanceof Error ? e.message : String(e)}`;
+    this.state = { ...this.state, error: message };
+    this.logEvent(`ERROR ${message}`);
+    this.emit();
+  }
+
+  private logEvent(message: string): void {
+    if (!__DEV__) return;
+    const line = `${new Date().toISOString().slice(14, 23)} ${message}`;
+    this.state = { ...this.state, log: [...this.state.log.slice(-(LOG_LIMIT - 1)), line] };
     this.emit();
   }
 

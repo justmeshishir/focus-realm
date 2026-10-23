@@ -2,7 +2,8 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { audioEngine } from '@/audio/audioEngine';
 import { SOUND_CATALOG } from '@/audio/soundCatalog';
-import { useActiveCount, useAnyInterrupted, useMasterVolume } from '@/audio/useMixer';
+import { useActiveCount, useAnyInterrupted, useEngineError, useMasterVolume } from '@/audio/useMixer';
+import { DebugLog } from '@/components/DebugLog';
 import { SoundRow } from '@/components/SoundRow';
 import { colors, spacing } from '@/theme';
 
@@ -10,9 +11,16 @@ export default function MixerScreen() {
   const master = useMasterVolume();
   const activeCount = useActiveCount();
   const anyInterrupted = useAnyInterrupted();
+  const error = useEngineError();
 
   return (
     <ScrollView contentContainerStyle={styles.content}>
+      {error && (
+        <View style={[styles.banner, styles.bannerError]}>
+          <Text style={styles.bannerText}>Audio error — {error}</Text>
+        </View>
+      )}
+
       {anyInterrupted && (
         <Pressable style={styles.banner} onPress={() => void audioEngine.resumeInterrupted()}>
           <Text style={styles.bannerText}>Audio was interrupted — tap to resume</Text>
@@ -41,6 +49,8 @@ export default function MixerScreen() {
       {SOUND_CATALOG.map((def) => (
         <SoundRow key={def.id} def={def} />
       ))}
+
+      <DebugLog />
     </ScrollView>
   );
 }
@@ -48,6 +58,7 @@ export default function MixerScreen() {
 const styles = StyleSheet.create({
   content: { padding: spacing.md, gap: spacing.sm },
   banner: { backgroundColor: colors.warning, borderRadius: 12, padding: spacing.md },
+  bannerError: { backgroundColor: '#FF6B6B' },
   bannerText: { color: colors.bg, fontWeight: '700', textAlign: 'center' },
   master: { gap: spacing.sm, paddingVertical: spacing.sm },
   masterLabel: { color: colors.textMuted, fontSize: 13, textTransform: 'uppercase', letterSpacing: 1 },
