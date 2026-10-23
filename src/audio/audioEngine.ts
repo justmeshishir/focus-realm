@@ -96,9 +96,9 @@ export class AudioEngine {
   init(): Promise<void> {
     this.initPromise ??= (async () => {
       try {
-        const applied = await configureAudioSession();
+        await configureAudioSession();
         this.appStateSub ??= AppState.addEventListener('change', this.onAppStateChange);
-        this.logEvent(`audio session: ${applied}`);
+        this.logEvent('audio session configured');
       } catch (e) {
         // Don't cache a rejected promise: that would make every later tap fail identically and silently.
         this.initPromise = null;
